@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metro Dash 3D</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #0d1a2f; }
+        #container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            width: 100vw;
+            height: 100vh;
+            touch-action: none; /* Prevents default mobile browser actions like pull-to-refresh */
+        }
+        #hud {
+            position: absolute;
+            top: 20px;
+            color: #66ffff;
+            font-family: Arial, sans-serif;
+            font-size: 2em;
+            text-shadow: 0 0 5px #000;
+            z-index: 10;
+        }
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 2.5em;
+            color: white;
+            text-shadow: 3px 3px 5px #ff0077;
+            text-align: center;
+            line-height: 1.2;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            border-radius: 10px;
+            user-select: none;
+            z-index: 20;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="hud">Score: 0</div>
+    <div id="message">Tap or Press SPACE to Start! Use swipes for movement (LEFT/RIGHT for lanes, UP for jump).</div>
+    <div id="container"></div>
+
+    <script>
+        // --- Game Setup ---
+        let scene, camera, renderer;
+        let player;
+        let obstacles = [];
+        let isPlaying = false;
+        let score = 0;
+        let animationFrameId;
+
+        // --- Touch Control State ---
+        let touchStartX = 0;
+        let touchStartY = 0;
+        const SWIPE_THRESHOLD = 50;
+        const TAP_JUMP_THRESHOLD = 10;
+        
+        // --- Game Constants ---
+        const LANE_WIDTH = 2; // Width of each lane
+        const LANES = [-LANE_WIDTH, 0, LANE_WIDTH]; // X positions for lanes 0, 1, 2
+        const PLAYER_SIZE = 0.5;
+        let FORWARD_SPEED = 0.15; // Continuous forward speed (Made variable for speed increase)
+        const LANE_SWITCH_SPEED = 0.1;
+        const JUMP_FORCE = 0.5; // Increased jump force to clear 1.0 unit obstacles
+        const GRAVITY = -0.015;
+        const OBSTACLE_SPAWN_Z_DISTANCE = -100; // Spawn distance
+        const OBSTACLE_DESPAWN_Z = 5;
+        const TRACK_LENGTH = 500; // How far the track extends
+
+        // --- Game State Variables ---
+        let currentLane = 1; // Start in the middle lane (index 1)
+        let playerVelocityY = 0;
+        let playerTargetX = LANES[currentLane];
+        let frameCount = 0;
+        let spawnRate = 40; // Spawn obstacle every N frames (Made variable for difficulty)
+
+        // --- Player Model Function ---
+        function createPlayerModel() {
+            const group = new THREE.Group();
+
+            // Hoverboard (Base)
+            const boardGeometry = new THREE.BoxGeometry(0.7, 0.1, 0.7);
+            const boardMaterial = new THREE.MeshLambertMaterial({ color: 0x33ffaa }); // Neon Green Board
+            const board = new THREE.Mesh(boardGeometry, boardMaterial);
+            board.position.y = 0.05; // Base is at Y=0
+            group.add(board);
+
+            // Torso/Body
+            const bodyGeometry = new THREE.BoxGeometry(0.4, 0.7, 0.3);
+            const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xcccccc }); // Silver Suit
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.y = 0.45; 
+            group.add(body);
+
+            // Head
+            const headGeometry = new THREE.SphereGeometry(0.2, 8, 8);
+            const headMaterial = new THREE.MeshLambertMaterial({ color: 0xff8800 }); // Orange Helmet
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.y = 0.9; 
+            group.add(head);
+
+            return group; 
+        }
+
+        // --- THREE.js Initialization ---
+        function init() {
+            // 1. Scene setup
+            scene = new THREE.Scene();
+            scene.fog = new THREE.Fog(0x0d1a2f, 1, 100); // Deep blue fog
+
+            // 2. Camera setup (Perspective camera)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 1.5, 3); // Positioned slightly above and behind the player
+
+            // 3. Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            const container = document.getElementById('container');
+            container.appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040); 
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 10, 5);
+            scene.add(directionalLight);
+
+            // 5. Create Player (Using the new detailed model)
+            player = createPlayerModel();
+            player.position.set(LANES[currentLane], 0, 0); // Y position is 0 (ground level)
+            scene.add(player);
+
+            // 6. Create Ground (Track)
+            const groundGeometry = new THREE.PlaneGeometry(LANE_WIDTH * 3 + 0.1, TRACK_LENGTH * 2);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x222222 }); // Dark gray
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2; // Rotate to lie flat
+            ground.position.z = -TRACK_LENGTH; 
+            scene.add(ground);
+            
+            // Draw lane markers on the ground
+            for (let i = 0; i < 4; i++) {
+                const markerGeometry = new THREE.PlaneGeometry(0.05, TRACK_LENGTH * 2);
+                const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+                const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+                marker.rotation.x = -Math.PI / 2;
+                marker.position.x = LANES[0] - (LANE_WIDTH / 2) + i * LANE_WIDTH;
+                marker.position.z = -TRACK_LENGTH;
+                scene.add(marker);
+            }
+
+            // Set up initial message
+            document.getElementById('message').style.display = 'block';
+
+            // 7. Start the continuous animation loop
+            gameLoop();
+            
+            // 8. Setup Mobile Touch Listeners
+            container.addEventListener('touchstart', onTouchStart, false);
+            container.addEventListener('touchend', onTouchEnd, false);
+        }
+
+        // --- Game Logic ---
+
+        function updatePlayerPosition() {
+            // 1. Horizontal Lane Switching
+            player.position.x += (playerTargetX - player.position.x) * LANE_SWITCH_SPEED;
+
+            // 2. Vertical Jump/Gravity
+            playerVelocityY += GRAVITY;
+            player.position.y += playerVelocityY;
+
+            // Prevent falling through ground (Ground level is Y=0)
+            if (player.position.y <= 0) {
+                player.position.y = 0;
+                playerVelocityY = 0;
+            }
+        }
+
+        function spawnObstacles() {
+            if (frameCount % spawnRate === 0) {
+                // Randomly choose 1 or 2 lanes for obstacles
+                const lanesToBlock = [];
+                // 1 in 3 chance of blocking two lanes
+                if (Math.random() < 0.33) { 
+                    // Block two random adjacent lanes
+                    const startLane = Math.floor(Math.random() * 2); 
+                    lanesToBlock.push(startLane);
+                    lanesToBlock.push(startLane + 1);
+                } else {
+                    // Block one random lane
+                    lanesToBlock.push(Math.floor(Math.random() * 3));
+                }
+
+                lanesToBlock.forEach(laneIndex => {
+                    // 60% chance of jumpable (1.0 high), 40% chance of dodge-only (2.5 high)
+                    const blockHeight = Math.random() < 0.6 ? 1.0 : 2.5; 
+                    const obstacleGeometry = new THREE.BoxGeometry(LANE_WIDTH * 0.9, blockHeight, 1);
+                    const obstacleMaterial = new THREE.MeshLambertMaterial({ color: 0x00aaff }); // Blue obstacle
+                    
+                    const obstacle = new THREE.Mesh(obstacleGeometry, obstacleMaterial);
+                    obstacle.position.set(LANES[laneIndex], blockHeight / 2, OBSTACLE_SPAWN_Z_DISTANCE);
+                    obstacle.lane = laneIndex; // Store lane info for collision
+                    
+                    obstacles.push(obstacle);
+                    scene.add(obstacle);
+                });
+            }
+        }
+
+        function updateObstacles() {
+            // Move obstacles towards the camera
+            const travelSpeed = FORWARD_SPEED * 6;
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                const obstacle = obstacles[i];
+                obstacle.position.z += travelSpeed; // Move obstacles faster than player's conceptual forward speed
+
+                if (obstacle.position.z > OBSTACLE_DESPAWN_Z) {
+                    scene.remove(obstacle);
+                    obstacles.splice(i, 1);
+                }
+            }
+        }
+
+        function checkCollision() {
+            // THREE.Box3 automatically calculates the bounding box for the entire THREE.Group (the player model)
+            const playerBox = new THREE.Box3().setFromObject(player);
+
+            for (let i = 0; i < obstacles.length; i++) {
+                const obstacle = obstacles[i];
+                const obstacleBox = new THREE.Box3().setFromObject(obstacle);
+
+                // If the bounding boxes intersect, it's a collision
+                if (playerBox.intersectsBox(obstacleBox)) {
+                    gameOver();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // --- Game Flow ---
+
+        function startGame() {
+            if (isPlaying) return;
+
+            // Reset game state
+            score = 0;
+            isPlaying = true;
+            FORWARD_SPEED = 0.15; // Reset speed
+            spawnRate = 40; // Reset difficulty
+            document.getElementById('message').style.display = 'none';
+            
+            // Reset Player Position/Lane
+            currentLane = 1;
+            playerTargetX = LANES[currentLane];
+            player.position.y = 0; // Reset player to ground level
+            playerVelocityY = 0;
+            player.position.x = playerTargetX; // Snap to center lane on start
+            
+            // Clear all existing obstacles
+            obstacles.forEach(o => scene.remove(o));
+            obstacles = [];
+        }
+
+        function gameOver() {
+            isPlaying = false;
+            // The requestAnimationFrame loop continues, but the logic pauses
+            document.getElementById('message').textContent = `GAME OVER! Score: ${Math.floor(score)}\nTap or Press SPACE to play again.`;
+            document.getElementById('message').style.display = 'block';
+        }
+
+        // --- Main Animation Loop ---
+        function gameLoop() {
+            // 1. Render Scene (ALWAYS render, even when paused, to show the game over screen)
+            renderer.render(scene, camera);
+            animationFrameId = requestAnimationFrame(gameLoop);
+
+            if (!isPlaying) return;
+            
+            // 2. Update Game State
+            updatePlayerPosition();
+            spawnObstacles();
+            updateObstacles();
+            
+            // 3. Check Conditions
+            if (checkCollision()) {
+                return; // Stop processing further game logic this frame if game over
+            }
+
+            // 4. Update Score and Difficulty
+            score += FORWARD_SPEED * 10;
+            
+            // Difficulty curve: Increase speed and obstacle frequency slightly
+            if (frameCount % 600 === 0) { // Every 10 seconds (approx)
+                FORWARD_SPEED *= 1.05;
+                if (spawnRate > 15) {
+                   spawnRate -= 1;
+                }
+            }
+            
+            document.getElementById('hud').textContent = `Score: ${Math.floor(score)}`;
+            
+            frameCount++;
+        }
+
+        // --- Touch Input Handlers ---
+        
+        function onTouchStart(e) {
+            e.preventDefault();
+            if (e.touches.length > 0) {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+
+                if (!isPlaying) {
+                    startGame();
+                }
+            }
+        }
+        
+        function onTouchEnd(e) {
+            // We use touchstart and touchend to measure the swipe distance/direction
+            if (e.changedTouches.length === 0 || !isPlaying) return;
+            
+            const touchEndX = e.changedTouches[0].clientX;
+            const touchEndY = e.changedTouches[0].clientY;
+
+            const dx = touchEndX - touchStartX;
+            const dy = touchEndY - touchStartY;
+
+            // Determine if it was a horizontal or vertical swipe
+            if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_THRESHOLD) {
+                // Horizontal Swipe (Lane Change)
+                if (dx > 0) {
+                    // Swipe Right
+                    currentLane = Math.min(2, currentLane + 1);
+                } else {
+                    // Swipe Left
+                    currentLane = Math.max(0, currentLane - 1);
+                }
+                playerTargetX = LANES[currentLane];
+                
+            } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > SWIPE_THRESHOLD) {
+                // Vertical Swipe (Jump)
+                if (dy < 0) { // Swipe Up
+                    if (player.position.y === 0) { // Check against ground level Y=0
+                        playerVelocityY = JUMP_FORCE;
+                    }
+                }
+            } else if (Math.abs(dx) < TAP_JUMP_THRESHOLD && Math.abs(dy) < TAP_JUMP_THRESHOLD) {
+                // Simple Tap (Allow tap-to-jump if no major swipe detected)
+                 if (player.position.y === 0) { // Check against ground level Y=0
+                    playerVelocityY = JUMP_FORCE;
+                }
+            }
+        }
+
+        // --- Keyboard Input (Kept for convenience on desktop/debugging) ---
+        
+        window.addEventListener('keydown', (e) => {
+            if (e.key === ' ' || e.key === 'Space') {
+                e.preventDefault();
+                if (!isPlaying) {
+                    startGame();
+                } else if (player.position.y === 0) { // Allow jump with spacebar
+                    playerVelocityY = JUMP_FORCE;
+                }
+            }
+            if (isPlaying) {
+                 switch (e.key) {
+                    case 'ArrowLeft':
+                        currentLane = Math.max(0, currentLane - 1);
+                        playerTargetX = LANES[currentLane];
+                        break;
+                    case 'ArrowRight':
+                        currentLane = Math.min(2, currentLane + 1);
+                        playerTargetX = LANES[currentLane];
+                        break;
+                }
+            }
+        });
+        
+        // --- Initialize the Game ---
+        window.onload = init;
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
